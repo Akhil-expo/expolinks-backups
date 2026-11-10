@@ -1,0 +1,47 @@
+# Weekly backup of the Expolinks Production database (Supabase).
+# Runs every Monday at 2:00 am India time, and whenever you click "Run workflow".
+# Each backup is kept for 90 days under Actions → the run → Artifacts.
+name: Weekly database backup
+
+on:
+  schedule:
+    - cron: "30 20 * * 0" # Sunday 20:30 UTC = Monday 02:00 IST
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install the Postgres backup tool
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-client-18
+
+      - name: Back up the database
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DB_URL}" ]; then echo "The SUPABASE_DB_URL secret is missing. Add it under Settings → Secrets and variables → Actions."; exit 1; fi
+          day=$(date -u +%F)
+          PG=/usr/lib/postgresql/18/bin
+          # all app data and structure (POs, styles, entries, cartons, outsourcing, comments, history)
+          $PG/pg_dump "$DB_URL" --schema=public --no-owner --no-privileges --format=custom --file="expolinks-data-$day.dump"
+          # the same, as plain text you can open and read
+          $PG/pg_dump "$DB_URL" --schema=public --no-owner --no-privileges --file="expolinks-data-$day.sql"
+          # the five logins (so they can be restored with the same accounts)
+          $PG/pg_dump "$DB_URL" --data-only --table=auth.users --table=auth.identities --file="expolinks-logins-$day.sql"
+          gzip -9 "expolinks-data-$day.sql" "expolinks-logins-$day.sql"
+          ls -la expolinks-*
+          echo "Rows in the main tables:"
+          $PG/psql "$DB_URL" -Atc "select 'POs: ' || count(*) from purchase_orders union all select 'Daily entries: ' || count(*) from production_entries union all select 'Cartons: ' || count(*) from cartons"
+
+      - name: Keep the backup files
+        uses: actions/upload-artifact@v4
+        with:
+          name: expolinks-backup-${{ github.run_number }}
+          path: expolinks-*
+          retention-days: 90
